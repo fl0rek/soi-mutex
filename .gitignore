@@ -30,3 +30,13 @@
 
 # Debug files
 *.dSYM/
+
+
+#vim
+*.swp 
+
+*.d
+*.o
+
+test*.out
+

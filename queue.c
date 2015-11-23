@@ -6,9 +6,6 @@
 #include <sys/mman.h>
 #include "queue.h"
 
-#define BUFF_LEN 128
-#define MAX_PRIORITY 10
-
 
 typedef struct queue_sem {
 	sem_t mutex;			//
@@ -18,19 +15,13 @@ typedef struct queue_sem {
 
 typedef struct queue {
 	enum {pusta, cos, pelna} status;
-	char* q[BUFF_LEN];
+	int q[BUFF_LEN];
 	uint16_t q_start,
 		 q_end;
-} queue_type ; /*[MAX_PRIORITY] = { {
-	.status = pusta,
-} }; */
+} queue_type;
 
 queue_type *queue;
 queue_sem *sems;
-/*
-static uint16_t	q_start[MAX_PRIORITY] = {0},
-       		q_end[MAX_PRIORITY] = {0};
-		*/
 
 void QInit(void) {
 	if((queue = (queue_type*) mmap(0, MAX_PRIORITY* sizeof(*queue), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0)) < 0)
@@ -46,44 +37,66 @@ void QInit(void) {
 		if(sem_init(&sems->full[i], 1, BUFF_LEN) < 0) // all queues have BUFF_LEN free spaces
 			perror("full initialisation"), exit(-1);
 
-		//queue[i] = { .status = pusta };
 		queue[i].status = pusta;
 		queue[i].q_start = queue[i].q_end = 0;
 	}
 }
 
-int QSend(unsigned priority, char* enq) {
+
+void QPrintQueue(void) {
+	sem_wait(&sems->mutex);
+	printf("Queue ===\n");
+	for(int i = 0; i <= MAX_PRIORITY; i++) {
+		unsigned size = 0;
+		printf("pri : %d\n", i);
+		if(queue[i].status != pusta)
+			for(uint16_t it = queue[i].q_start; QPos(it) != QPos(queue[i].q_end) || (queue[i].status == pelna && size != BUFF_LEN); it = QPos(it+1)) {
+				int shm_key = queue[i].q[QPos(it)];
+				char *ptr;
+				if((ptr = (char*) shmat(shm_key, 0, SHM_RDONLY)) == (char*) -1)
+					perror("shmat in QPrintQueue"), exit(-1);
+				printf("\t%u: \"%s\" [%d]\n", ++size, ptr, queue[i].q[QPos(it)]);
+				shmdt(ptr);
+			}
+		printf("\t\tsize: %u\n", size);
+	}
+	printf("=========\n");
+	fflush(stdout);
+	sem_post(&sems->mutex);
+}
+
+
+int QSend(unsigned priority, int enq) {
 	sem_wait(&sems->full[priority]);
 	sem_wait(&sems->mutex);
-
+	printf("inserting ");
 	int status_ok = ! (queue[priority].status == pelna);
 	if(status_ok) {
-		queue[priority].q[queue[priority].q_end++ & BUFF_LEN-1] = enq;
-		queue[priority].status = (queue[priority].q_end & BUFF_LEN-1) == (queue[priority].q_start & BUFF_LEN-1) ? pelna : cos;
+		queue[priority].q[QPos(queue[priority].q_end++)] = enq;
+		queue[priority].status = QPos(queue[priority].q_end) == QPos(queue[priority].q_start) ? pelna : cos;
 	}
-	printf("sent %u\n", priority);
+	printf("qsent %u [%d]\n", priority, queue[priority].q[QPos(queue[priority].q_end-1)]);
 
 	sem_post(&sems->mutex);
 	sem_post(&sems->empty);
 	return status_ok;
 }
 
-static char* QRecFrom(unsigned priority) { // non thread safe!
-	//printf("getting from %u\n", priority);
+static int QRecFrom(unsigned priority) { // non thread safe!
 	if(queue[priority].status == pusta)
-		return 0; //err
-	char *ret = queue[priority].q[queue[priority].q_start++ & BUFF_LEN-1];
-	queue[priority].status = (queue[priority].q_start & BUFF_LEN-1) == (queue[priority].q_end & BUFF_LEN-1) ? pusta : cos;
+		return -1; //err
+	int ret = queue[priority].q[QPos(queue[priority].q_start)];
+	queue[priority].q[QPos(queue[priority].q_start++)] = -2; // clear mostly or debug puproses
+	queue[priority].status = QPos(queue[priority].q_start) == QPos(queue[priority].q_end) ? pusta : cos;
 	return ret;
 }
 
-char* QRec(void) {
-	char* ret = 0;
+int QRec(void) {
+	int ret = -1;
 	unsigned i;
 	sem_wait(&sems->empty);
 	sem_wait(&sems->mutex);
 	for(i = 0; i <= MAX_PRIORITY; i++) {
-		//printf("checking %d\n", MAX_PRIORITY-i);
 		if(queue[MAX_PRIORITY-i].status != pusta) {
 			ret = QRecFrom(MAX_PRIORITY-i);
 			break;
